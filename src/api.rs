@@ -150,6 +150,39 @@ struct YmDownloadUrl {
     s: String,
 }
 
+/// Check a Yandex OAuth token with `/account/status`.
+///
+/// Returns the account login and whether Plus is active. Used by the CLI so a
+/// mistyped token is reported immediately instead of failing on the first
+/// search.
+pub async fn check_yandex_token(token: &str) -> anyhow::Result<(String, bool)> {
+    let clean_token: String = token.chars().take_while(|&c| c != '&').collect();
+    let resp = reqwest::Client::new()
+        .get(format!("{}/account/status", YM_API))
+        .header("Authorization", format!("OAuth {}", clean_token))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Yandex HTTP {}: {}", status, body);
+    }
+    let value: serde_json::Value = resp.json().await?;
+    let result = value.get("result").cloned().unwrap_or_default();
+    let login = result
+        .get("account")
+        .and_then(|a| a.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let plus = result
+        .get("plus")
+        .and_then(|p| p.get("hasPlus"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((login, plus))
+}
+
 pub async fn search_yandex(query: &str, token: &str) -> anyhow::Result<Vec<Track>> {
     let clean_token: String = token.chars().take_while(|&c| c != '&').collect();
 

@@ -493,6 +493,8 @@ pub async fn run(args: Vec<String>) -> i32 {
         "info" => run_info(flags),
         "config" => run_config(flags),
         "sources" => run_sources(flags),
+        "token" => run_token(flags).await,
+        "cookies" => run_cookies(flags),
         other if REMOTE_COMMANDS.contains(&other) => run_remote(other, flags).await,
         other => {
             eprintln!("error: unknown command '{other}'");
@@ -516,6 +518,8 @@ GENERAL:
     version, -V, --version            show the version
     config                            show config/data paths and configured sources
     sources                           list supported sources
+    token <TOKEN>                     save the Yandex Music token (no TUI needed)
+    cookies [FILE]                    show or set the YouTube cookies file
 
 PLAYER CONTROL (needs a running TUI):
     status [--json]                   playback state, current track, volume
@@ -933,6 +937,7 @@ fn run_config(flags: Flags) -> i32 {
             "yandex_token": !cfg.yandex_token.is_empty(),
             "soundcloud_client_id": !cfg.soundcloud_client_id.is_empty(),
             "lastfm_api_key": !cfg.lastfm_api_key.is_empty(),
+            "ytdlp_cookies": config::cookies_file(),
         }));
     } else {
         println!("Version:   {}", env!("CARGO_PKG_VERSION"));
@@ -967,8 +972,76 @@ fn run_config(flags: Flags) -> i32 {
                 "set"
             }
         );
+        println!(
+            "YouTube cookies:       {}",
+            match config::cookies_file() {
+                Some(path) => path.display().to_string(),
+                None => "not set (age-restricted tracks unavailable; run scripts\\youtube-cookies.cmd)".to_string(),
+            }
+        );
         println!("Control:   {}", endpoint_display());
     }
+    0
+}
+
+async fn run_token(flags: Flags) -> i32 {
+    let token = flags.positional.join(" ");
+    let token = token.trim();
+    if token.is_empty() {
+        eprintln!("error: token needs a value");
+        eprintln!("usage: larp-music-player token <YANDEX_TOKEN>");
+        eprintln!();
+        eprintln!("Get a token at https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d");
+        return 2;
+    }
+
+    println!("Checking the token with Yandex Music...");
+    match api::check_yandex_token(token).await {
+        Ok((login, plus)) => {
+            let mut cfg = config::load();
+            cfg.yandex_token = token.to_string();
+            config::save(&cfg);
+            if login.is_empty() {
+                println!("Token saved and accepted by Yandex Music.");
+            } else {
+                println!(
+                    "Token saved. Signed in as {}{}.",
+                    login,
+                    if plus { " (Plus active)" } else { "" }
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: Yandex did not accept the token: {e}");
+            eprintln!("Nothing was saved. Copy the whole token from the OAuth page and try again.");
+            1
+        }
+    }
+}
+
+fn run_cookies(flags: Flags) -> i32 {
+    let mut cfg = config::load();
+    let value = flags.positional.join(" ");
+    let value = value.trim();
+    if value.is_empty() {
+        match config::cookies_file() {
+            Some(path) => println!("YouTube cookies: {}", path.display()),
+            None => println!("YouTube cookies: not configured"),
+        }
+        println!("Default file:    {}", config::default_cookies_file().display());
+        println!("Set one with:    larp-music-player cookies <cookies.txt>");
+        return 0;
+    }
+
+    let path = expand_path(value);
+    if !path.is_file() {
+        eprintln!("error: file not found: {}", path.display());
+        return 1;
+    }
+    cfg.ytdlp_cookies = path.to_string_lossy().into_owned();
+    config::save(&cfg);
+    println!("YouTube cookies: {}", path.display());
     0
 }
 
@@ -997,7 +1070,10 @@ fn run_sources(flags: Flags) -> i32 {
             "name": "ytmusic",
             "label": "YouTube Music",
             "ready": true,
-            "detail": "uses yt-dlp for playback",
+            "detail": match config::cookies_file() {
+                Some(path) => format!("uses yt-dlp; cookies: {}", path.display()),
+                None => "uses yt-dlp; no cookies (age-restricted tracks unavailable)".to_string(),
+            },
         }),
         json!({
             "name": "local",

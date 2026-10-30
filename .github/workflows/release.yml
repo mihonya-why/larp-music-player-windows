@@ -31,13 +31,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
         run: cargo build --release --locked
-      - name: Package (exe + ytmeta.py + README)
+      - name: Package (exe + ytmeta.py + README + scripts)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/larp-music-player.exe dist/
           Copy-Item ytmeta.py dist/
           Copy-Item README.md dist/
+          Copy-Item scripts dist/scripts -Recurse
           Compress-Archive -Path dist/* -DestinationPath larp-music-player-windows-x86_64.zip -Force
           $hash = (Get-FileHash larp-music-player-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  larp-music-player-windows-x86_64.zip" | Set-Content -Encoding ascii larp-music-player-windows-x86_64.zip.sha256

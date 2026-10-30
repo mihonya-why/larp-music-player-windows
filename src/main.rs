@@ -64,14 +64,20 @@ fn discord_state(
 }
 
 fn save_all_config(app: &App, cfg: &config::Config) {
-    config::save(&config::Config {
-        yandex_token: app.token.clone(),
-        soundcloud_client_id: app.sc_client_id.clone(),
-        discord_client_id: cfg.discord_client_id.clone(),
-        lastfm_api_key: cfg.lastfm_api_key.clone(),
-        liked_shuffle: app.liked_shuffle,
-        last_update_check: cfg.last_update_check,
-    });
+    // Start from what is on disk instead of rebuilding the whole struct: that
+    // keeps settings the TUI does not manage (the update-check timestamp,
+    // cookies path, ...) and can never drop the token that is already saved.
+    let mut next = config::load();
+    next.yandex_token = app.token.clone();
+    next.soundcloud_client_id = app.sc_client_id.clone();
+    next.liked_shuffle = app.liked_shuffle;
+    if next.discord_client_id.is_empty() {
+        next.discord_client_id = cfg.discord_client_id.clone();
+    }
+    if next.lastfm_api_key.is_empty() {
+        next.lastfm_api_key = cfg.lastfm_api_key.clone();
+    }
+    config::save(&next);
 }
 
 fn discord_resume(discord: &Option<discord_rpc::DiscordRpc>, app: &App) {
@@ -87,6 +93,31 @@ fn temp_media_path(prefix: &str, track_id: &str) -> String {
         .join(format!("{prefix}_{}.mp3", sanitize_filename(track_id)))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Extra yt-dlp arguments that authenticate YouTube requests with a cookies
+/// file, when the user has one (see `config::cookies_file`). Without cookies,
+/// age-restricted tracks fail with "Sign in to confirm your age".
+fn ytdlp_cookie_args() -> Vec<String> {
+    match config::cookies_file() {
+        Some(path) => vec![
+            "--cookies".to_string(),
+            path.to_string_lossy().into_owned(),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// Turn the age-restriction failure into something the user can act on.
+fn ytdlp_error_hint(stderr: &str) -> Option<String> {
+    if stderr.contains("Sign in to confirm your age") || stderr.contains("age-restricted") {
+        Some(format!(
+            "age-restricted YouTube track: export cookies first (run scripts\\youtube-cookies.cmd), expected at {}",
+            config::default_cookies_file().display()
+        ))
+    } else {
+        None
+    }
 }
 
 /// Use UTF-8 in the Windows console so Cyrillic titles and box drawing render
@@ -200,22 +231,18 @@ fn start_update_check(cfg: &config::Config, cmd_tx: &mpsc::UnboundedSender<app::
     if now.saturating_sub(cfg.last_update_check) < 24 * 60 * 60 {
         return;
     }
-    let mut fresh = config::Config {
-        yandex_token: String::new(),
-        soundcloud_client_id: String::new(),
-        discord_client_id: cfg.discord_client_id.clone(),
-        lastfm_api_key: cfg.lastfm_api_key.clone(),
-        liked_shuffle: cfg.liked_shuffle,
-        last_update_check: now,
-    };
+    // Re-read the config and only touch the timestamp. The previous version
+    // rebuilt the struct from scratch and saved it with an empty
+    // `yandex_token`, so once a day the saved token was silently deleted.
+    let mut fresh = config::load();
+    fresh.last_update_check = now;
+    config::save(&fresh);
     let saved = cmd_tx.clone();
     tokio::spawn(async move {
         if let Some((tag, url)) = update::check().await {
             let _ = saved.send(app::Command::UpdateAvailable { tag, url });
         }
     });
-    config::save(&fresh);
-    fresh.last_update_check = now;
 }
 
 fn start_download_liked(app: &App, cmd_tx: &mpsc::UnboundedSender<app::Command>, silent: bool) {
@@ -405,6 +432,7 @@ async fn download_soundcloud(track_id: &str, dest: &std::path::Path) -> Result<(
 async fn download_ytmusic(track_id: &str, dest: &std::path::Path) -> Result<(), String> {
     let track_url = format!("https://music.youtube.com/watch?v={}", track_id);
     let dest_path = dest.with_extension("").to_str().unwrap_or("").to_string();
+    let cookies = ytdlp_cookie_args();
     tokio::task::spawn_blocking(move || {
         let output = std::process::Command::new("yt-dlp")
             .args([
@@ -418,6 +446,7 @@ async fn download_ytmusic(track_id: &str, dest: &std::path::Path) -> Result<(), 
                 "bestaudio",
             ])
             .args(["--force-overwrites"])
+            .args(&cookies)
             .args(["-o", &format!("{}.%(ext)s", dest_path)])
             .arg(&track_url)
             .output()
@@ -427,6 +456,9 @@ async fn download_ytmusic(track_id: &str, dest: &std::path::Path) -> Result<(), 
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             dlog!("download_ytmusic failed: {}", stderr.trim());
+            if let Some(hint) = ytdlp_error_hint(&stderr) {
+                return Err(hint);
+            }
             Err(stderr
                 .lines()
                 .rev()
@@ -643,6 +675,7 @@ fn play_track(
                 let vol = app.volume;
                 let cmd_tx2 = cmd_tx.clone();
                 let track_id = app.get_current_track_id().unwrap_or_default();
+                let cookies = ytdlp_cookie_args();
                 tokio::spawn(async move {
                     let _ = cmd_tx2.send(app::Command::DownloadProgress(0));
                     let tmp_path = temp_media_path("ytm", &track_id);
@@ -661,6 +694,7 @@ fn play_track(
                                     "bestaudio",
                                 ])
                                 .args(["--force-overwrites"])
+                                .args(&cookies)
                                 .args(["-o", &tmp_path])
                                 .arg(format!("https://music.youtube.com/watch?v={}", track_id))
                                 .output()
@@ -678,7 +712,9 @@ fn play_track(
                             } else {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
                                 dlog!("ytmusic yt-dlp failed: {}", stderr.trim());
-                                let msg = if stderr.contains("DRM protected") {
+                                let msg = if let Some(hint) = ytdlp_error_hint(&stderr) {
+                                    hint
+                                } else if stderr.contains("DRM protected") {
                                     "DRM protected — not available".to_string()
                                 } else {
                                     let short: String = stderr

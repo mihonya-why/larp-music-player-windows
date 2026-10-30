@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
-pub const REPO: &str = "Raskulchik/larp-music-player-windows";
+// Releases of this fork. Change back to the upstream repository if the fork is
+// ever retired.
+pub const REPO: &str = "mihonya-why/larp-music-player-windows";
 
 fn api_url() -> String {
     format!("https://api.github.com/repos/{}/releases/latest", REPO)
