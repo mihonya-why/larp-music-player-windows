@@ -20,13 +20,15 @@ a fork of the Windows port. On top of `v0.4.1` it fixes:
   to rewrite `config.json` with an empty `yandex_token`, so a saved token
   silently disappeared after a day and Yandex Music fell back to 30-second
   iTunes previews. The check now only updates its own timestamp.
-- **Age-restricted YouTube tracks play** when a cookies file is available
-  (`cookies.txt`, see below). Without cookies YouTube refuses every player
-  client with `Sign in to confirm your age`.
+- **Age-restricted YouTube tracks fall back to Yandex Music.** YouTube only
+  serves 18+ audio to a signed-in client, so instead of requiring cookies the
+  player searches Yandex Music for the same artist and title and plays it with
+  the account you already use. Cookies are optional (see below).
 - **`larp-music-player token <TOKEN>`** saves and validates a Yandex token from
   plain `cmd.exe`, no TUI and no launcher required.
-- **`larp-music-player cookies <FILE>`** points the player at a cookies file;
-  `%APPDATA%\music-player-tui\cookies.txt` is picked up automatically.
+- **`larp-music-player cookies <FILE>`** optionally points the player at a
+  cookies file; `%APPDATA%\music-player-tui\cookies.txt` is picked up
+  automatically. No cookies are needed for normal playback.
 - `save_all_config` no longer overwrites unrelated settings from a stale copy
   of the config.
 - The update check follows this fork's releases.
@@ -92,28 +94,35 @@ Get one from the
 
 ### Age-restricted YouTube tracks (18+)
 
-YouTube refuses to serve age-restricted audio to anonymous clients, regardless
-of the `player_client` used. The player therefore passes a cookies file to
-`yt-dlp` when one is configured.
+Normal playback needs no cookies and no browser login. YouTube only serves
+age-restricted audio to a signed-in client, so when `yt-dlp` reports
+`Sign in to confirm your age` the player searches Yandex Music for the same
+artist and title and plays that copy instead:
 
-Easiest way: run the helper from the extracted folder (double-click or from
-`cmd`/PowerShell):
+```
+18+ on YouTube, trying Yandex Music...
+Playing from Yandex Music: Molchat Doma - Kletka
+```
+
+This needs a Yandex Music token (see above); without one there is nothing to
+fall back to. If the track is missing from Yandex as well, the only remaining
+option is a YouTube sign-in, which is entirely optional:
 
 ```bat
 scripts\youtube-cookies.cmd
 ```
 
-It opens Microsoft Edge with a dedicated profile, waits until you close that
-window, exports the cookies to
-`%APPDATA%\music-player-tui\cookies.txt` and verifies them against an
-age-restricted video. Use `-Browser firefox`, `-Browser chrome` or
-`-UseExistingProfile` for other setups:
+The helper opens a separate browser window (its own profile, so your everyday
+browser can stay open), exports the cookies to
+`%APPDATA%\music-player-tui\cookies.txt` and verifies them. The player picks the
+file up automatically. `-Browser chrome`, `-Browser chromium`,
+`-Browser firefox` or `-UseExistingProfile` cover other setups:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\youtube-cookies.ps1 -Browser chrome
+powershell -ExecutionPolicy Bypass -File scripts\youtube-cookies.ps1 -Browser chromium -UseExistingProfile
 ```
 
-The player finds `cookies.txt` automatically. A file elsewhere can be set with:
+A cookies file stored elsewhere can be set with:
 
 ```bat
 larp-music-player.exe cookies "C:\path\to\cookies.txt"

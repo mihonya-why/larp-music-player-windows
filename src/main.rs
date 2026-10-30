@@ -109,12 +109,14 @@ fn ytdlp_cookie_args() -> Vec<String> {
 }
 
 /// Turn the age-restriction failure into something the user can act on.
+/// The player itself retries the track on Yandex Music first, so this message
+/// is only shown when that did not work either.
 fn ytdlp_error_hint(stderr: &str) -> Option<String> {
     if stderr.contains("Sign in to confirm your age") || stderr.contains("age-restricted") {
-        Some(format!(
-            "age-restricted YouTube track: export cookies first (run scripts\\youtube-cookies.cmd), expected at {}",
-            config::default_cookies_file().display()
-        ))
+        Some(
+            "18+ track: YouTube only plays it for a signed-in client, and it was not found on Yandex Music. Optional: scripts\\youtube-cookies.cmd + `larp-music-player cookies`."
+                .to_string(),
+        )
     } else {
         None
     }
@@ -564,6 +566,64 @@ fn track_idx_at(app: &App, track_area: &Rect, y: u16) -> Option<usize> {
     }
 }
 
+/// Ask for the current track's artist and title, in a form that can be used as
+/// a Yandex Music search query.
+fn current_track_query(app: &App) -> String {
+    let Some(track) = app.current_track() else {
+        return String::new();
+    };
+    let artist = track.artist.trim();
+    let title = track.title.trim();
+    if artist.is_empty() || artist.eq_ignore_ascii_case("unknown") {
+        title.to_string()
+    } else if title.is_empty() {
+        artist.to_string()
+    } else {
+        format!("{} {}", artist, title)
+    }
+}
+
+/// Play the same song from Yandex Music when YouTube refuses an age-restricted
+/// track. YouTube only serves those to a signed-in client, so instead of asking
+/// every user for cookies we fall back to the Yandex Music account the player
+/// is already logged in with. Returns true when playback was started.
+async fn yandex_fallback(
+    tx: &mpsc::UnboundedSender<player::PlayerCommand>,
+    cmd_tx: &mpsc::UnboundedSender<app::Command>,
+    query: &str,
+    token: &str,
+    volume: f32,
+    gen: u64,
+) -> bool {
+    let _ = cmd_tx.send(app::Command::Status(
+        "18+ on YouTube, trying Yandex Music...".to_string(),
+    ));
+    let found = match api::search_yandex(query, token).await {
+        Ok(tracks) => tracks.into_iter().next(),
+        Err(e) => {
+            dlog!("yandex fallback search failed: {}", e);
+            None
+        }
+    };
+    let Some(track) = found else {
+        return false;
+    };
+    match api::get_yandex_download_url(&track.id, token).await {
+        Ok(url) => {
+            let _ = cmd_tx.send(app::Command::Status(format!(
+                "Playing from Yandex Music: {} - {}",
+                track.artist, track.title
+            )));
+            let _ = tx.send(player::PlayerCommand::PlayFile(url, volume, gen, true));
+            true
+        }
+        Err(e) => {
+            dlog!("yandex fallback download failed: {}", e);
+            false
+        }
+    }
+}
+
 fn play_track(
     player_tx: &mpsc::UnboundedSender<player::PlayerCommand>,
     app: &App,
@@ -676,6 +736,8 @@ fn play_track(
                 let cmd_tx2 = cmd_tx.clone();
                 let track_id = app.get_current_track_id().unwrap_or_default();
                 let cookies = ytdlp_cookie_args();
+                let token = app.token.clone();
+                let fallback_query = current_track_query(app);
                 tokio::spawn(async move {
                     let _ = cmd_tx2.send(app::Command::DownloadProgress(0));
                     let tmp_path = temp_media_path("ytm", &track_id);
@@ -712,20 +774,36 @@ fn play_track(
                             } else {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
                                 dlog!("ytmusic yt-dlp failed: {}", stderr.trim());
-                                let msg = if let Some(hint) = ytdlp_error_hint(&stderr) {
-                                    hint
-                                } else if stderr.contains("DRM protected") {
-                                    "DRM protected — not available".to_string()
-                                } else {
-                                    let short: String = stderr
-                                        .lines()
-                                        .rev()
-                                        .find(|l| l.starts_with("ERROR:"))
-                                        .unwrap_or("unknown error")
-                                        .to_string();
-                                    format!("yt-dlp: {}", short)
-                                };
-                                let _ = cmd_tx2.send(app::Command::PlayError(msg));
+                                let hint = ytdlp_error_hint(&stderr);
+                                let mut recovered = false;
+                                if hint.is_some() && !token.is_empty() && !fallback_query.is_empty()
+                                {
+                                    recovered = yandex_fallback(
+                                        &tx,
+                                        &cmd_tx2,
+                                        &fallback_query,
+                                        &token,
+                                        vol,
+                                        gen,
+                                    )
+                                    .await;
+                                }
+                                if !recovered {
+                                    let msg = if let Some(hint) = hint {
+                                        hint
+                                    } else if stderr.contains("DRM protected") {
+                                        "DRM protected — not available".to_string()
+                                    } else {
+                                        let short: String = stderr
+                                            .lines()
+                                            .rev()
+                                            .find(|l| l.starts_with("ERROR:"))
+                                            .unwrap_or("unknown error")
+                                            .to_string();
+                                        format!("yt-dlp: {}", short)
+                                    };
+                                    let _ = cmd_tx2.send(app::Command::PlayError(msg));
+                                }
                             }
                         }
                         Ok(Err(e)) => {

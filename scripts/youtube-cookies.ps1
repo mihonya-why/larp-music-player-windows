@@ -8,7 +8,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('edge', 'chrome', 'brave', 'opera', 'vivaldi', 'firefox')]
+    [ValidateSet('edge', 'chrome', 'chromium', 'brave', 'opera', 'vivaldi', 'firefox')]
     [string]$Browser = 'edge',
 
     # Use the browser's normal profile instead of a dedicated one. Close the
@@ -32,6 +32,11 @@ function Find-Browser([string]$Name) {
             "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
             "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
             "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe")
+        }
+        'chromium' { @(
+            "$env:LOCALAPPDATA\Chromium\Application\chrome.exe",
+            "$env:ProgramFiles\Chromium\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Chromium\Application\chrome.exe")
         }
         'brave' { @(
             "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
