@@ -42,7 +42,10 @@ fn config_file() -> PathBuf {
 pub fn load() -> Config {
     let path = config_file();
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        // Editors on Windows like to add a UTF-8 BOM; `serde_json` rejects it
+        // and the player would fall back to defaults, wiping every setting on
+        // the next save.
+        Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_default(),
         Err(_) => Config::default(),
     }
 }

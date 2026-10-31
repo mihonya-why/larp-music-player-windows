@@ -566,21 +566,29 @@ fn track_idx_at(app: &App, track_area: &Rect, y: u16) -> Option<usize> {
     }
 }
 
-/// Ask for the current track's artist and title, in a form that can be used as
-/// a Yandex Music search query.
-fn current_track_query(app: &App) -> String {
+/// Search queries to try on Yandex Music for the current YouTube track.
+///
+/// YouTube Music metadata is inconsistent: the artist is often "Unknown" or the
+/// uploader's channel name instead of the band, so a single "artist title"
+/// query frequently returns nothing even when Yandex has the song. The title
+/// alone is the reliable second attempt.
+fn yandex_queries(app: &App) -> Vec<String> {
+    let mut queries = Vec::new();
     let Some(track) = app.current_track() else {
-        return String::new();
+        return queries;
     };
     let artist = track.artist.trim();
     let title = track.title.trim();
-    if artist.is_empty() || artist.eq_ignore_ascii_case("unknown") {
-        title.to_string()
-    } else if title.is_empty() {
-        artist.to_string()
-    } else {
-        format!("{} {}", artist, title)
+    if !artist.is_empty() && !artist.eq_ignore_ascii_case("unknown") && !title.is_empty() {
+        queries.push(format!("{} {}", artist, title));
     }
+    if !title.is_empty() && !queries.iter().any(|q| q.as_str() == title) {
+        queries.push(title.to_string());
+    }
+    if queries.is_empty() && !artist.is_empty() {
+        queries.push(artist.to_string());
+    }
+    queries
 }
 
 /// Play the same song from Yandex Music when YouTube refuses an age-restricted
@@ -590,7 +598,7 @@ fn current_track_query(app: &App) -> String {
 async fn yandex_fallback(
     tx: &mpsc::UnboundedSender<player::PlayerCommand>,
     cmd_tx: &mpsc::UnboundedSender<app::Command>,
-    query: &str,
+    queries: &[String],
     token: &str,
     volume: f32,
     gen: u64,
@@ -598,13 +606,19 @@ async fn yandex_fallback(
     let _ = cmd_tx.send(app::Command::Status(
         "18+ on YouTube, trying Yandex Music...".to_string(),
     ));
-    let found = match api::search_yandex(query, token).await {
-        Ok(tracks) => tracks.into_iter().next(),
-        Err(e) => {
-            dlog!("yandex fallback search failed: {}", e);
-            None
+    let mut found = None;
+    for query in queries {
+        match api::search_yandex(query, token).await {
+            Ok(tracks) => match tracks.into_iter().next() {
+                Some(track) => {
+                    found = Some(track);
+                    break;
+                }
+                None => dlog!("yandex fallback: no results for '{}'", query),
+            },
+            Err(e) => dlog!("yandex fallback search failed for '{}': {}", query, e),
         }
-    };
+    }
     let Some(track) = found else {
         return false;
     };
@@ -737,7 +751,7 @@ fn play_track(
                 let track_id = app.get_current_track_id().unwrap_or_default();
                 let cookies = ytdlp_cookie_args();
                 let token = app.token.clone();
-                let fallback_query = current_track_query(app);
+                let fallback_queries = yandex_queries(app);
                 tokio::spawn(async move {
                     let _ = cmd_tx2.send(app::Command::DownloadProgress(0));
                     let tmp_path = temp_media_path("ytm", &track_id);
@@ -776,12 +790,12 @@ fn play_track(
                                 dlog!("ytmusic yt-dlp failed: {}", stderr.trim());
                                 let hint = ytdlp_error_hint(&stderr);
                                 let mut recovered = false;
-                                if hint.is_some() && !token.is_empty() && !fallback_query.is_empty()
+                                if hint.is_some() && !token.is_empty() && !fallback_queries.is_empty()
                                 {
                                     recovered = yandex_fallback(
                                         &tx,
                                         &cmd_tx2,
-                                        &fallback_query,
+                                        &fallback_queries,
                                         &token,
                                         vol,
                                         gen,

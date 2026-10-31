@@ -976,7 +976,7 @@ fn run_config(flags: Flags) -> i32 {
             "YouTube cookies:       {}",
             match config::cookies_file() {
                 Some(path) => path.display().to_string(),
-                None => "not set (age-restricted tracks unavailable; run scripts\\youtube-cookies.cmd)".to_string(),
+                None => "not set (18+ tracks fall back to Yandex Music)".to_string(),
             }
         );
         println!("Control:   {}", endpoint_display());
@@ -1072,7 +1072,7 @@ fn run_sources(flags: Flags) -> i32 {
             "ready": true,
             "detail": match config::cookies_file() {
                 Some(path) => format!("uses yt-dlp; cookies: {}", path.display()),
-                None => "uses yt-dlp; no cookies (age-restricted tracks unavailable)".to_string(),
+                None => "uses yt-dlp; 18+ tracks fall back to Yandex Music".to_string(),
             },
         }),
         json!({
