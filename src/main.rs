@@ -95,12 +95,14 @@ fn temp_media_path(prefix: &str, track_id: &str) -> String {
         .into_owned()
 }
 
-/// Extra yt-dlp arguments that authenticate YouTube requests with a cookies
-/// file, when the user has one (see `config::cookies_file`). Without cookies,
-/// age-restricted tracks fail with "Sign in to confirm your age".
+/// Extra yt-dlp arguments that authenticate YouTube requests: a browser name
+/// becomes `--cookies-from-browser`, a file becomes `--cookies`.
 fn ytdlp_cookie_args() -> Vec<String> {
-    match config::cookies_file() {
-        Some(path) => vec![
+    match config::cookie_source() {
+        Some(config::CookieSource::Browser(browser)) => {
+            vec!["--cookies-from-browser".to_string(), browser]
+        }
+        Some(config::CookieSource::File(path)) => vec![
             "--cookies".to_string(),
             path.to_string_lossy().into_owned(),
         ],
@@ -108,15 +110,85 @@ fn ytdlp_cookie_args() -> Vec<String> {
     }
 }
 
+/// yt-dlp cannot read Chromium's cookie database while the browser is running,
+/// and on Windows it may also fail to decrypt cookies (DPAPI/keyring problems).
+/// Those failures must not break normal playback, so they are retried without
+/// cookies instead of being reported as a playback error.
+fn is_cookie_db_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    (lower.contains("could not copy") && lower.contains("cookie database"))
+        || (lower.contains("could not find") && lower.contains("cookies database"))
+        || lower.contains("failed to decrypt")
+        || (lower.contains("cookies") && lower.contains("permission denied"))
+}
+
+/// Result of one yt-dlp audio download.
+struct YtdlpAudio {
+    success: bool,
+    stderr: String,
+    /// True when cookies were configured but unreadable and the download was
+    /// retried anonymously.
+    cookies_dropped: bool,
+}
+
+/// Download `url` to `out_template` (which may contain `%(ext)s`) as mp3, using
+/// the configured cookies and falling back to an anonymous attempt when the
+/// browser cookie database cannot be read.
+fn ytdlp_audio(url: &str, out_template: &str) -> std::io::Result<YtdlpAudio> {
+    let run = |cookie_args: &[String]| {
+        std::process::Command::new("yt-dlp")
+            .args([
+                "--no-playlist",
+                "-x",
+                "--audio-format",
+                "mp3",
+                "--audio-quality",
+                "128K",
+                "-f",
+                "bestaudio",
+            ])
+            .arg("--force-overwrites")
+            .args(cookie_args)
+            .args(["-o", out_template])
+            .arg(url)
+            .output()
+    };
+
+    let cookies = ytdlp_cookie_args();
+    let mut output = run(&cookies)?;
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut cookies_dropped = false;
+    if !output.status.success() && !cookies.is_empty() && is_cookie_db_error(&stderr) {
+        dlog!(
+            "yt-dlp cannot read browser cookies, retrying without them: {}",
+            stderr.trim()
+        );
+        output = run(&[])?;
+        stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        cookies_dropped = true;
+    }
+    Ok(YtdlpAudio {
+        success: output.status.success(),
+        stderr,
+        cookies_dropped,
+    })
+}
+
 /// Turn the age-restriction failure into something the user can act on.
 /// The player itself retries the track on Yandex Music first, so this message
 /// is only shown when that did not work either.
 fn ytdlp_error_hint(stderr: &str) -> Option<String> {
     if stderr.contains("Sign in to confirm your age") || stderr.contains("age-restricted") {
-        Some(
-            "18+ track: YouTube only plays it for a signed-in client, and it was not found on Yandex Music. Optional: scripts\\youtube-cookies.cmd + `larp-music-player cookies`."
+        let extra = match config::cookie_source() {
+            Some(config::CookieSource::Browser(browser)) => format!(
+                " YouTube cookies from {browser} cannot be read while it is running: close {browser} completely, or export a file with scripts\\youtube-cookies.cmd."
+            ),
+            _ => " Optional: `larp-music-player cookies chromium` (close the browser first) or scripts\\youtube-cookies.cmd."
                 .to_string(),
-        )
+        };
+        Some(format!(
+            "18+ track: YouTube only plays it for a signed-in client, and it was not found on Yandex Music.{extra}"
+        ))
     } else {
         None
     }
@@ -434,34 +506,18 @@ async fn download_soundcloud(track_id: &str, dest: &std::path::Path) -> Result<(
 async fn download_ytmusic(track_id: &str, dest: &std::path::Path) -> Result<(), String> {
     let track_url = format!("https://music.youtube.com/watch?v={}", track_id);
     let dest_path = dest.with_extension("").to_str().unwrap_or("").to_string();
-    let cookies = ytdlp_cookie_args();
     tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new("yt-dlp")
-            .args([
-                "--no-playlist",
-                "-x",
-                "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "128K",
-                "-f",
-                "bestaudio",
-            ])
-            .args(["--force-overwrites"])
-            .args(&cookies)
-            .args(["-o", &format!("{}.%(ext)s", dest_path)])
-            .arg(&track_url)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if output.status.success() {
+        let out_template = format!("{}.%(ext)s", dest_path);
+        let run = ytdlp_audio(&track_url, &out_template).map_err(|e| e.to_string())?;
+        if run.success {
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            dlog!("download_ytmusic failed: {}", stderr.trim());
-            if let Some(hint) = ytdlp_error_hint(&stderr) {
+            dlog!("download_ytmusic failed: {}", run.stderr.trim());
+            if let Some(hint) = ytdlp_error_hint(&run.stderr) {
                 return Err(hint);
             }
-            Err(stderr
+            Err(run
+                .stderr
                 .lines()
                 .rev()
                 .find(|l| l.starts_with("ERROR:"))
@@ -749,7 +805,6 @@ fn play_track(
                 let vol = app.volume;
                 let cmd_tx2 = cmd_tx.clone();
                 let track_id = app.get_current_track_id().unwrap_or_default();
-                let cookies = ytdlp_cookie_args();
                 let token = app.token.clone();
                 let fallback_queries = yandex_queries(app);
                 tokio::spawn(async move {
@@ -758,35 +813,27 @@ fn play_track(
                     let result = tokio::task::spawn_blocking({
                         let tmp_path = tmp_path.clone();
                         move || {
-                            std::process::Command::new("yt-dlp")
-                                .args([
-                                    "--no-playlist",
-                                    "-x",
-                                    "--audio-format",
-                                    "mp3",
-                                    "--audio-quality",
-                                    "128K",
-                                    "-f",
-                                    "bestaudio",
-                                ])
-                                .args(["--force-overwrites"])
-                                .args(&cookies)
-                                .args(["-o", &tmp_path])
-                                .arg(format!("https://music.youtube.com/watch?v={}", track_id))
-                                .output()
+                            let url = format!("https://music.youtube.com/watch?v={}", track_id);
+                            ytdlp_audio(&url, &tmp_path)
                         }
                     })
                     .await;
 
                     match result {
-                        Ok(Ok(output)) => {
+                        Ok(Ok(run)) => {
                             let _ = cmd_tx2.send(app::Command::DownloadProgress(100));
-                            if output.status.success() {
+                            if run.cookies_dropped {
+                                let _ = cmd_tx2.send(app::Command::Status(
+                                    "Browser cookies unavailable (close the browser), playing without them"
+                                        .to_string(),
+                                ));
+                            }
+                            if run.success {
                                 let _ = tx.send(player::PlayerCommand::PlayFile(
                                     tmp_path, vol, gen, true,
                                 ));
                             } else {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                let stderr = run.stderr;
                                 dlog!("ytmusic yt-dlp failed: {}", stderr.trim());
                                 let hint = ytdlp_error_hint(&stderr);
                                 let mut recovered = false;

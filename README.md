@@ -26,9 +26,11 @@ a fork of the Windows port. On top of `v0.4.1` it fixes:
   the account you already use. Cookies are optional (see below).
 - **`larp-music-player token <TOKEN>`** saves and validates a Yandex token from
   plain `cmd.exe`, no TUI and no launcher required.
-- **`larp-music-player cookies <FILE>`** optionally points the player at a
-  cookies file; `%APPDATA%\music-player-tui\cookies.txt` is picked up
-  automatically. No cookies are needed for normal playback.
+- **`larp-music-player cookies <BROWSER|FILE>`** optionally tells `yt-dlp` where
+  to find YouTube cookies: `cookies chromium` uses
+  `--cookies-from-browser chromium` (works with Chrome, Firefox, Edge, ...), a
+  path uses `--cookies <file>`, and `%APPDATA%\music-player-tui\cookies.txt` is
+  picked up automatically. No cookies are needed for normal playback.
 - `save_all_config` no longer overwrites unrelated settings from a stale copy
   of the config.
 - The update check follows this fork's releases.
@@ -106,7 +108,27 @@ Playing from Yandex Music: Molchat Doma - Kletka
 
 This needs a Yandex Music token (see above); without one there is nothing to
 fall back to. If the track is missing from Yandex as well, the only remaining
-option is a YouTube sign-in, which is entirely optional:
+option is a YouTube sign-in, which is entirely optional. The player can read
+cookies straight from your browser, the same way `yt-dlp --cookies-from-browser
+chromium` does:
+
+```bat
+larp-music-player.exe cookies chromium
+larp-music-player.exe cookies firefox
+larp-music-player.exe cookies edge
+```
+
+`chromium`, `chrome`, `brave`, `edge`, `firefox`, `opera`, `safari`, `vivaldi`
+and `whale` are accepted; `firefox:ProfileName` picks a specific profile. The
+player then passes `--cookies-from-browser <BROWSER>` to `yt-dlp`.
+
+Chromium-based browsers lock their cookie database while they are running, so
+close the browser completely before playing an 18+ track. If the database
+cannot be read, the player says so and retries without cookies instead of
+failing the track.
+
+Alternatively export the cookies to a file, which works even while the browser
+is open:
 
 ```bat
 scripts\youtube-cookies.cmd
@@ -126,12 +148,12 @@ A cookies file stored elsewhere can be set with:
 
 ```bat
 larp-music-player.exe cookies "C:\path\to\cookies.txt"
+larp-music-player.exe cookies off
 larp-music-player.exe config
 ```
 
-Cookies expire after a while; re-run the helper when age-restricted tracks stop
-working. A dedicated browser profile matters because Chromium-based browsers
-lock their cookie database while running.
+Cookies expire after a while; re-run the helper (or reconnect the browser
+profile) when age-restricted tracks stop working.
 
 
 ## Build from source
@@ -166,6 +188,7 @@ larp-music-player.exe volume 40
 larp-music-player.exe search "Molchat Doma" -s ytmusic -n 5
 larp-music-player.exe stats --top 10
 larp-music-player.exe token "y0_AgAAAA..."
+larp-music-player.exe cookies chromium
 larp-music-player.exe cookies "%APPDATA%\music-player-tui\cookies.txt"
 ```
 

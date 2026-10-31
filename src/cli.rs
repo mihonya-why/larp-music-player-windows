@@ -519,7 +519,7 @@ GENERAL:
     config                            show config/data paths and configured sources
     sources                           list supported sources
     token <TOKEN>                     save the Yandex Music token (no TUI needed)
-    cookies [FILE]                    show or set the YouTube cookies file
+    cookies [BROWSER|FILE|off]        show or set where yt-dlp reads YouTube cookies from
 
 PLAYER CONTROL (needs a running TUI):
     status [--json]                   playback state, current track, volume
@@ -923,6 +923,14 @@ fn run_info(flags: Flags) -> i32 {
     }
 }
 
+fn cookies_display() -> String {
+    match config::cookie_source() {
+        Some(config::CookieSource::Browser(browser)) => format!("browser: {}", browser),
+        Some(config::CookieSource::File(path)) => path.display().to_string(),
+        None => "not set (18+ tracks fall back to Yandex Music)".to_string(),
+    }
+}
+
 fn run_config(flags: Flags) -> i32 {
     let cfg = config::load();
     let db_path = paths::config_dir().join("liked.db");
@@ -937,7 +945,11 @@ fn run_config(flags: Flags) -> i32 {
             "yandex_token": !cfg.yandex_token.is_empty(),
             "soundcloud_client_id": !cfg.soundcloud_client_id.is_empty(),
             "lastfm_api_key": !cfg.lastfm_api_key.is_empty(),
-            "ytdlp_cookies": config::cookies_file(),
+            "ytdlp_cookies": match config::cookie_source() {
+                Some(config::CookieSource::Browser(browser)) => json!({ "browser": browser }),
+                Some(config::CookieSource::File(path)) => json!({ "file": path }),
+                None => json!(null),
+            },
         }));
     } else {
         println!("Version:   {}", env!("CARGO_PKG_VERSION"));
@@ -972,13 +984,7 @@ fn run_config(flags: Flags) -> i32 {
                 "set"
             }
         );
-        println!(
-            "YouTube cookies:       {}",
-            match config::cookies_file() {
-                Some(path) => path.display().to_string(),
-                None => "not set (18+ tracks fall back to Yandex Music)".to_string(),
-            }
-        );
+        println!("YouTube cookies:       {}", cookies_display());
         println!("Control:   {}", endpoint_display());
     }
     0
@@ -1025,18 +1031,40 @@ fn run_cookies(flags: Flags) -> i32 {
     let value = flags.positional.join(" ");
     let value = value.trim();
     if value.is_empty() {
-        match config::cookies_file() {
-            Some(path) => println!("YouTube cookies: {}", path.display()),
-            None => println!("YouTube cookies: not configured"),
-        }
+        println!("YouTube cookies: {}", cookies_display());
         println!("Default file:    {}", config::default_cookies_file().display());
-        println!("Set one with:    larp-music-player cookies <cookies.txt>");
+        println!(
+            "Read from browser: larp-music-player cookies <BROWSER>  ({})",
+            config::COOKIE_BROWSERS.join(", ")
+        );
+        println!("Use a cookies file: larp-music-player cookies <cookies.txt>");
+        println!("Disable:            larp-music-player cookies off");
+        return 0;
+    }
+
+    if ["off", "none", "clear", "disable"]
+        .iter()
+        .any(|word| value.eq_ignore_ascii_case(word))
+    {
+        cfg.ytdlp_cookies.clear();
+        config::save(&cfg);
+        println!("YouTube cookies: disabled");
+        return 0;
+    }
+
+    if config::is_cookie_browser(value) {
+        cfg.ytdlp_cookies = value.to_string();
+        config::save(&cfg);
+        println!("YouTube cookies: browser {}", value);
+        println!("yt-dlp will read them with --cookies-from-browser {value}.");
+        println!("Close the browser completely while playing 18+ tracks: it locks its cookie database.");
         return 0;
     }
 
     let path = expand_path(value);
     if !path.is_file() {
-        eprintln!("error: file not found: {}", path.display());
+        eprintln!("error: not a cookies file and not a known browser: {value}");
+        eprintln!("browsers: {}", config::COOKIE_BROWSERS.join(", "));
         return 1;
     }
     cfg.ytdlp_cookies = path.to_string_lossy().into_owned();
@@ -1070,8 +1098,13 @@ fn run_sources(flags: Flags) -> i32 {
             "name": "ytmusic",
             "label": "YouTube Music",
             "ready": true,
-            "detail": match config::cookies_file() {
-                Some(path) => format!("uses yt-dlp; cookies: {}", path.display()),
+            "detail": match config::cookie_source() {
+                Some(config::CookieSource::Browser(browser)) => {
+                    format!("uses yt-dlp; cookies from browser: {}", browser)
+                }
+                Some(config::CookieSource::File(path)) => {
+                    format!("uses yt-dlp; cookies: {}", path.display())
+                }
                 None => "uses yt-dlp; 18+ tracks fall back to Yandex Music".to_string(),
             },
         }),

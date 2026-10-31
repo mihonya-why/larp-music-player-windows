@@ -14,9 +14,10 @@ pub struct Config {
     pub liked_shuffle: bool,
     #[serde(default)]
     pub last_update_check: u64,
-    /// Optional path to a Netscape `cookies.txt` file for yt-dlp. Needed for
-    /// age-restricted YouTube tracks. When empty, `<config>/cookies.txt` is
-    /// used if it exists.
+    /// Where yt-dlp should get YouTube cookies from: either a browser name
+    /// (`chromium`, `firefox`, `edge`, ...) read directly with
+    /// `--cookies-from-browser`, or a path to a Netscape `cookies.txt` file.
+    /// When empty, `<config>/cookies.txt` is used if it exists.
     #[serde(default)]
     pub ytdlp_cookies: String,
 }
@@ -64,25 +65,70 @@ pub fn default_cookies_file() -> PathBuf {
     config_dir().join("cookies.txt")
 }
 
-/// The cookies file used for yt-dlp, if one is available.
+/// Browsers `yt-dlp --cookies-from-browser` knows about.
+pub const COOKIE_BROWSERS: &[&str] = &[
+    "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
+];
+
+/// Where yt-dlp should read YouTube cookies from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CookieSource {
+    /// Let yt-dlp read the cookies straight from a browser profile. The value is
+    /// passed to `--cookies-from-browser` unchanged, so `chromium`,
+    /// `firefox:ProfileName` and `chrome+gnomekeyring` all work.
+    Browser(String),
+    /// A Netscape `cookies.txt` file, passed with `--cookies`.
+    File(PathBuf),
+}
+
+/// True when the value looks like a `--cookies-from-browser` argument rather
+/// than a file path: a known browser, optionally with `+keyring` and/or
+/// `:profile`. Windows paths (`C:\...`) never match because the drive letter is
+/// not a browser name.
+pub fn is_cookie_browser(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    let base = value
+        .split([':', '+'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    COOKIE_BROWSERS.contains(&base.as_str())
+}
+
+/// Cookies yt-dlp should use, if any.
 ///
-/// `ytdlp_cookies` wins when it points at an existing file; otherwise
-/// `<config>/cookies.txt` is picked up automatically, so dropping the file
-/// next to `config.json` is enough to enable it.
-pub fn cookies_file() -> Option<PathBuf> {
+/// `ytdlp_cookies` wins: a browser name enables `--cookies-from-browser`, an
+/// existing file enables `--cookies`. When it is empty or points at a missing
+/// file, `<config>/cookies.txt` is picked up automatically.
+pub fn cookie_source() -> Option<CookieSource> {
     let cfg = load();
     let configured = cfg.ytdlp_cookies.trim();
     if !configured.is_empty() {
+        if is_cookie_browser(configured) {
+            return Some(CookieSource::Browser(configured.to_string()));
+        }
         let path = expand_home(configured);
         if path.is_file() {
-            return Some(path);
+            return Some(CookieSource::File(path));
         }
     }
     let fallback = default_cookies_file();
     if fallback.is_file() {
-        return Some(fallback);
+        return Some(CookieSource::File(fallback));
     }
     None
+}
+
+/// The cookies file used by yt-dlp, when one is configured.
+pub fn cookies_file() -> Option<PathBuf> {
+    match cookie_source() {
+        Some(CookieSource::File(path)) => Some(path),
+        _ => None,
+    }
 }
 
 /// Expand a leading `~`/`~user`-style home marker. Windows users normally pass
